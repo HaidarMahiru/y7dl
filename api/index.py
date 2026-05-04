@@ -5,16 +5,23 @@ import os
 import uuid
 import re
 import urllib.parse
+import glob
 
-app = FastAPI(title="YouTube Downloader API (Vercel Edition)")
+app = FastAPI(title="YouTube Downloader API (Vercel + Cookies Edition)")
 
+# Mendapatkan lokasi pasti dari file cookies.txt yang ada di satu folder dengan index.py
+COOKIE_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
+# Fungsi untuk menghapus file sampah di server Vercel (/tmp/) setelah terkirim
 def delete_file(path: str):
-    if os.path.exists(path):
+    if path and os.path.exists(path):
         os.remove(path)
 
+# Membersihkan nama file dari karakter ilegal
 def sanitize_filename(name: str):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
+# --- HALAMAN UTAMA (WEB UI) ---
 @app.get("/", response_class=HTMLResponse)
 async def home():
     html_content = """
@@ -38,6 +45,7 @@ async def home():
             .btn-download-final { display: block; background: #28a745; color: white; text-align: center; text-decoration: none; padding: 14px; border-radius: 8px; font-weight: bold; margin-top: 15px; }
             .api-box { margin-top: 20px; padding-top: 15px; border-top: 1px dashed #ccc; }
             .url-display { background: #eee; padding: 10px; border-radius: 6px; border: 1px solid #ccc; word-break: break-all; font-family: monospace; font-size: 12px; color: #555; }
+            .copy-btn { background: #6c757d; color: white; padding: 8px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; margin-top: 8px; }
         </style>
     </head>
     <body>
@@ -46,8 +54,8 @@ async def home():
             <form id="process-form">
                 <input type="url" name="url" id="url-input" placeholder="Tempel Link YouTube di sini..." required>
                 <div class="radio-group">
-                    <label><input type="radio" name="format_type" value="mp3" checked><span>🎵 MP3</span></label>
-                    <label><input type="radio" name="format_type" value="mp4"><span>🎬 MP4</span></label>
+                    <label><input type="radio" name="format_type" value="mp3" checked><span>🎵 Audio</span></label>
+                    <label><input type="radio" name="format_type" value="mp4"><span>🎬 Video</span></label>
                 </div>
                 <button type="submit" id="submit-btn">Proses Video</button>
             </form>
@@ -58,10 +66,16 @@ async def home():
                 <div class="api-box">
                     <div style="font-size: 12px; color: #666; margin-bottom: 5px;"><b>URL Eksekusi (API):</b></div>
                     <div id="res-url" class="url-display"></div>
+                    <button type="button" class="copy-btn" onclick="copyUrl()">📋 Salin URL</button>
                 </div>
             </div>
         </div>
         <script>
+            async function copyUrl() {
+                const urlText = document.getElementById('res-url').innerText;
+                await navigator.clipboard.writeText(urlText);
+                alert("URL berhasil disalin!");
+            }
             document.getElementById('process-form').addEventListener('submit', async (e) => {
                 e.preventDefault();
                 const btn = document.getElementById('submit-btn');
@@ -69,13 +83,15 @@ async def home():
                 const resultBox = document.getElementById('result-box');
                 const urlValue = document.getElementById('url-input').value;
                 const formatType = document.querySelector('input[name="format_type"]:checked').value;
+                
                 btn.disabled = true;
-                status.innerText = "Mengambil data...";
+                status.innerText = "Mengambil data... (Tunggu 1-3 detik)";
                 resultBox.style.display = 'none';
                 
                 const formData = new FormData();
                 formData.append("url", urlValue);
                 const endpoint = formatType === 'mp3' ? '/api/process/mp3' : '/api/process/mp4';
+                
                 try {
                     const response = await fetch(endpoint, { method: 'POST', body: formData });
                     const data = await response.json();
@@ -86,7 +102,7 @@ async def home():
                         document.getElementById('res-url').innerText = data.full_download_url;
                         resultBox.style.display = 'block';
                     } else { status.innerText = "Error: " + data.error; }
-                } catch (err) { status.innerText = "Koneksi gagal."; }
+                } catch (err) { status.innerText = "Koneksi gagal/Timeout dari Vercel."; }
                 btn.disabled = false;
             });
         </script>
@@ -95,39 +111,65 @@ async def home():
     """
     return HTMLResponse(content=html_content)
 
+# ==========================================
+# API TAHAP 1: AMBIL INFO & GENERATE LINK
+# ==========================================
+
 @app.post("/api/process/mp3")
 async def process_mp3(request: Request, url: str = Form(...)):
-    ydl_opts = {'quiet': True, 'extractor_args': {'youtube': {'player_client': ['android']}}}
+    ydl_opts = {
+        'quiet': True, 
+        'extractor_args': {'youtube': {'player_client': ['android']}},
+        'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
+    }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             title = info.get('title', 'Media')
+        
         base_url = str(request.base_url).rstrip('/')
         encoded_url = urllib.parse.quote(url)
         full_url = f"{base_url}/api/download/mp3?url={encoded_url}"
         return {"success": True, "title": title, "full_download_url": full_url}
-    except Exception as e: return {"success": False, "error": str(e)}
+    except Exception as e: 
+        return {"success": False, "error": str(e)}
 
 @app.post("/api/process/mp4")
 async def process_mp4(request: Request, url: str = Form(...)):
-    ydl_opts = {'quiet': True, 'extractor_args': {'youtube': {'player_client': ['android']}}}
+    ydl_opts = {
+        'quiet': True, 
+        'extractor_args': {'youtube': {'player_client': ['android']}},
+        'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
+    }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             title = info.get('title', 'Media')
+            
         base_url = str(request.base_url).rstrip('/')
         encoded_url = urllib.parse.quote(url)
         full_url = f"{base_url}/api/download/mp4?url={encoded_url}"
         return {"success": True, "title": title, "full_download_url": full_url}
-    except Exception as e: return {"success": False, "error": str(e)}
+    except Exception as e: 
+        return {"success": False, "error": str(e)}
+
+
+# ==========================================
+# API TAHAP 2: EKSEKUSI DOWNLOAD 
+# (Disesuaikan untuk Vercel /tmp/ environment)
+# ==========================================
 
 @app.get("/api/download/mp3")
 async def execute_download_mp3(background_tasks: BackgroundTasks, url: str):
     file_id = str(uuid.uuid4())[:8]
-    # PERUBAHAN PENTING UNTUK VERCEL: Gunakan /tmp/
-    final_file = f"/tmp/temp_{file_id}.mp3" 
+    base_file_path = f"/tmp/temp_{file_id}"
     
-    ydl_opts_info = {'quiet': True, 'extractor_args': {'youtube': {'player_client': ['android']}}}
+    ydl_opts_info = {
+        'quiet': True, 
+        'extractor_args': {'youtube': {'player_client': ['android']}},
+        'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
+    }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -135,30 +177,43 @@ async def execute_download_mp3(background_tasks: BackgroundTasks, url: str):
         safe_title = sanitize_filename(title)
         
         ydl_opts_dl = {
-            'outtmpl': f"/tmp/temp_{file_id}.%(ext)s", # Harus di /tmp/
+            'outtmpl': f"{base_file_path}.%(ext)s", 
             'format': 'bestaudio/best',
-            # Postprocessor dicopot/diubah karena Vercel biasanya tidak punya ffmpeg bawaan
             'quiet': True,
+            'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
         }
+        
+        # Eksekusi download di Vercel (tanpa postprocessor mp3 karena Vercel tidak ada ffmpeg)
         with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
             ydl.download([url])
             
-        # Jika file ternyata ekstensi m4a/webm dari youtube, kita biarkan saja karena tidak ada ffmpeg
-        downloaded_file = final_file if os.path.exists(final_file) else final_file.replace('.mp3', '.m4a')
-        if not os.path.exists(downloaded_file):
-            downloaded_file = final_file.replace('.mp3', '.webm')
+        # Cari file apa pun yang berhasil didownload dengan nama base_file_path
+        downloaded_files = glob.glob(f"{base_file_path}.*")
+        if not downloaded_files:
+            raise HTTPException(status_code=500, detail="Gagal mengunduh file.")
             
-        background_tasks.add_task(delete_file, downloaded_file)
-        return FileResponse(path=downloaded_file, media_type="audio/mpeg", filename=f"{safe_title}.mp3")
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+        actual_file = downloaded_files[0] # Ambil file yang terdownload (misal .m4a atau .webm)
+        file_ext = actual_file.split('.')[-1]
+            
+        background_tasks.add_task(delete_file, actual_file)
+        
+        # Kirim ke user. Meski aslinya .m4a, kita set mime typenya sebagai audio agar bisa langsung diputar
+        return FileResponse(path=actual_file, media_type=f"audio/{file_ext}", filename=f"{safe_title}.{file_ext}")
+        
+    except Exception as e: 
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/download/mp4")
 async def execute_download_mp4(background_tasks: BackgroundTasks, url: str):
     file_id = str(uuid.uuid4())[:8]
-    # PERUBAHAN PENTING UNTUK VERCEL: Gunakan /tmp/
-    final_file = f"/tmp/temp_{file_id}.mp4"
+    base_file_path = f"/tmp/temp_{file_id}"
     
-    ydl_opts_info = {'quiet': True, 'extractor_args': {'youtube': {'player_client': ['android']}}}
+    ydl_opts_info = {
+        'quiet': True, 
+        'extractor_args': {'youtube': {'player_client': ['android']}},
+        'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
+    }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -166,14 +221,26 @@ async def execute_download_mp4(background_tasks: BackgroundTasks, url: str):
         safe_title = sanitize_filename(title)
         
         ydl_opts_dl = {
-            'outtmpl': f"/tmp/temp_{file_id}.%(ext)s", # Harus di /tmp/
-            # Format diubah karena merge butuh ffmpeg. Kita ambil mp4 yang sudah jadi satu (kualitas mungkin turun ke 720p)
+            'outtmpl': f"{base_file_path}.%(ext)s", 
+            # Ambil format mp4 langsung (tanpa merge m4a+mp4) karena Vercel tidak ada ffmpeg
             'format': 'best[ext=mp4]/best', 
             'quiet': True,
+            'cookiefile': COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
         }
+        
         with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
             ydl.download([url])
             
-        background_tasks.add_task(delete_file, final_file)
-        return FileResponse(path=final_file, media_type="video/mp4", filename=f"{safe_title}.mp4")
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+        downloaded_files = glob.glob(f"{base_file_path}.*")
+        if not downloaded_files:
+            raise HTTPException(status_code=500, detail="Gagal mengunduh file.")
+            
+        actual_file = downloaded_files[0]
+        file_ext = actual_file.split('.')[-1]
+            
+        background_tasks.add_task(delete_file, actual_file)
+        
+        return FileResponse(path=actual_file, media_type="video/mp4", filename=f"{safe_title}.{file_ext}")
+        
+    except Exception as e: 
+        raise HTTPException(status_code=500, detail=str(e))
